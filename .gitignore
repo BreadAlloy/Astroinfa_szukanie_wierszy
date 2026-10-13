@@ -1,6 +1,7 @@
-*/out/
+out/*
+out_/*
 compile_commands.json
 
-*/large_file.dat
-*/moj_format/
-*/moj_format_duze/
+*/large-file.dat
+*/moj_format/*
+*/moj_format_duze/*

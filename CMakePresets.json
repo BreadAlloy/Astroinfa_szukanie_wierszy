@@ -1,0 +1,97 @@
+{
+    "version": 3,
+  "configurePresets": [
+    {
+      "name": "wspolne",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "installDir": "${sourceDir}/out/install/${presetName}"
+    },
+    {
+      "name": "debug",
+      "hidden": true,
+      "inherits": "wspolne",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "release",
+      "hidden": true,
+      "inherits": "wspolne",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "cuda_debug",
+      "hidden": true,
+      "inherits": "wspolne",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CUDA_DEBUG_FLAGS": "-g -G"
+      }
+    },
+    {
+      "name": "windows-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "cl.exe",
+        "CMAKE_CXX_COMPILER": "cl.exe"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      }
+    },
+    {
+      "name": "unix-base",
+      "hidden": true,
+      "condition": {
+        "type": "notEquals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      }
+    },
+    {
+      "name": "windows-debug",
+      "displayName": "Debug",
+      "inherits": [ "windows-base", "debug" ]
+    },
+    {
+      "name": "windows-cuda-debug",
+      "displayName": "DebugCuda",
+      "inherits": [ "windows-base", "cuda_debug" ]
+    },
+    {
+      "name": "windows-release",
+      "displayName": "Release",
+      "inherits": [ "windows-base", "release" ]
+    },
+    {
+      "name": "unix-debug",
+      "displayName": "Debug",
+      "inherits": [ "unix-base", "debug" ]
+    },
+    {
+      "name": "unix-cuda-debug",
+      "displayName": "DebugCuda",
+      "inherits": [ "unix-base", "cuda_debug" ]
+    },
+    {
+      "name": "unix-release",
+      "displayName": "Release",
+      "inherits": [ "unix-base", "release" ]
+    }
+  ]
+}
