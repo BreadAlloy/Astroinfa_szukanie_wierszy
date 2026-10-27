@@ -157,13 +157,11 @@ add_library(SOIL STATIC
     SOIL/stb_image_aug.c
 )
 
-
-
 add_executable(
     "zad1_exec" "lab1/lab1.cpp"
 )
 target_include_directories("zad1_exec" PUBLIC ${jsoncpp_INCLUDE_DIR})
-target_link_libraries(zad1_exec PUBLIC jsoncpp_static)
+target_link_libraries(zad1_exec PUBLIC jsoncpp_static aio)
 
 # set_target_properties( exec PROPERTIES CUDA_SEPARABLE_COMPILATION ON )
 

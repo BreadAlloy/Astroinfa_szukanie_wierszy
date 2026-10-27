@@ -5,12 +5,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <cwchar>
 #include <inttypes.h>
 #include <limits>
 #include <stdio.h>
 #include <string>
 #include <vector>
+#include <chrono>
+#include <libaio.h>
+#include <fcntl.h>
+#include <malloc.h>
 
 #include "json/json.h"
 #include <iostream>
@@ -32,6 +37,7 @@ constexpr uint8_t kolumna_typ_long = 2; // int64_t
 
 typedef int64_t pamiec_rekordu;
 constexpr size_t rozmiar_rekordu = sizeof(pamiec_rekordu);
+constexpr size_t _4kb = 1024 * 4;
 
 typedef pamiec_rekordu row_idx_t;
 
@@ -322,7 +328,6 @@ struct kolumna_double_t : kolumna_t {
     }
 };
 
-
 struct wiersz_t {
     std::vector<pamiec_rekordu> dane;
 
@@ -596,13 +601,16 @@ struct czytacz_mojego_t{
 template<typename typ_cos>
 struct znajdywacz_w_pliku_t{
     czytacz_pliku_t czytacz_kolumny;
-    FILE* fd_cale = nullptr;
+    int fd_cale = 0;
 
     typ_cos wartosc_od;
     typ_cos wartosc_do;
 
     uint32_t liczba_kolumn = 0;
     typ_t typ_kolumny = kolumna_typ_brak;
+
+    std::vector<row_idx_t> znalezione_idx_wierszy;
+    std::vector<wiersz_t> znalezione_wiersze;
 
     znajdywacz_w_pliku_t(const czytacz_mojego_t& czytacz_mojego, std::string nazwa_kolumny
         , typ_cos wartosc)
@@ -639,11 +647,191 @@ struct znajdywacz_w_pliku_t{
     }
 
     void otworz_cale(const czytacz_mojego_t& czytacz_mojego){
-        fd_cale = moje_io::fopen(czytacz_mojego.folder + "cale.bin", "rb");
+        fd_cale = open((czytacz_mojego.folder + "cale.bin").c_str(), O_RDONLY | O_DIRECT);
+        if(fd_cale == -1){
+            printf("%s\n", strerror(errno));
+            assert(false);
+        }
+    }
+
+    void wczytaj_indeksy_wierszy(){
+        row_idx_t idx_wiersza;
+
+        switch (typ_kolumny) {
+
+            case(kolumna_typ_double):
+            while(true){
+                rekord<double>& rekord_ = *(rekord<double>*)czytacz_kolumny.tu_czytac();
+
+                if (rekord_.wartosc > wartosc_do) {
+                    break;
+                }
+
+                idx_wiersza = rekord_.idx;
+                znalezione_idx_wierszy.emplace_back(idx_wiersza);
+
+                czytacz_kolumny.przeczytano(sizeof(rekord<int64_t>));
+            }
+                break;
+
+            case(kolumna_typ_long):
+            while(true){
+                rekord<int64_t>& rekord_ = *(rekord<int64_t>*)czytacz_kolumny.tu_czytac();
+
+                if (rekord_.wartosc > wartosc_do) {
+                    break;
+                }
+
+                idx_wiersza = rekord_.idx;
+                znalezione_idx_wierszy.emplace_back(idx_wiersza);
+
+                czytacz_kolumny.przeczytano(sizeof(rekord<int64_t>));
+            }
+                break;
+
+            default:{
+                assert(false);
+            }
+        }
+
+    }
+
+    size_t ile_wierszy_znaleziono() const {
+        return znalezione_idx_wierszy.size();
+    }
+
+    void przygotuj_wiersze(){
+        znalezione_wiersze.resize(ile_wierszy_znaleziono(), liczba_kolumn);
+    }
+
+    void wczytaj_wiersze_asynch(){
+        constexpr size_t ile_asynch_requestow = 256;
+
+        int ret;
+        timespec timeout;
+        timeout.tv_sec = 10;
+
+        std::vector<iocb> iocbsy(ile_asynch_requestow);
+        std::vector<iocb*> wskazniki_na_iocbsy(ile_asynch_requestow);
+        std::vector<io_event> io_eventy(ile_asynch_requestow);
+
+        // zaklada, że wczytywany wiersz < 4kb
+        char* buffor = (char*)memalign(_4kb, 2 * _4kb * 2 * ile_asynch_requestow); 
+        assert(buffor != nullptr);
+
+        io_context_t kontekst = nullptr;
+        ret = io_setup(ile_asynch_requestow, &kontekst);
+        if(ret != 0){
+            printf("%s\n", strerror(-ret));
+            assert(false);
+        }
+
+        for(size_t i = 0; i < ile_asynch_requestow; i++){
+            wskazniki_na_iocbsy[i] = &(iocbsy[i]);
+        }
+
+        bool buffor_switch = true;
+
+        size_t ile_przeczytac_do = ile_asynch_requestow;
+        size_t ile_przeczytac_z = 0;
+        for(size_t j = 0; j < ile_wierszy_znaleziono(); j+=ile_przeczytac_do){
+
+            // które pół buffora użyć
+            size_t in_buffor_offset = _4kb * 2 * ile_asynch_requestow;
+            size_t out_buffor_offset = 0;
+            if(buffor_switch){
+                in_buffor_offset = 0;
+                out_buffor_offset = _4kb * 2 * ile_asynch_requestow;
+            }
+
+            // przeczytać mniej jeśli już wszystko znaleziono
+            ile_przeczytac_do = ile_asynch_requestow;
+            if((j + ile_przeczytac_do) > ile_wierszy_znaleziono()){
+                ile_przeczytac_do =  ile_wierszy_znaleziono() - j;
+            }
+
+            // przygotować do wczytywania
+            for(size_t i = 0; i < ile_przeczytac_do; i++){
+                const wiersz_t& wiersz = znalezione_wiersze[i + j];
+
+                size_t offset = wiersz.byte_size() * znalezione_idx_wierszy[i + j];
+
+                size_t offset_aligned = (offset / _4kb) * _4kb;
+
+                size_t location_in_block = offset - offset_aligned;
+                
+                size_t ile_4kb = 1;
+                
+                if((location_in_block + wiersz.byte_size()) > _4kb){
+                    ile_4kb++;
+                }
+
+                io_prep_pread(wskazniki_na_iocbsy[i], fd_cale, 
+                              buffor + in_buffor_offset + i * 2 * _4kb,
+                              ile_4kb * _4kb, offset_aligned);
+            }
+
+            ret = io_submit(kontekst, ile_przeczytac_do, wskazniki_na_iocbsy.data());
+            if(ret != (int)ile_przeczytac_do){
+                printf("%s\n", strerror(errno));
+                assert(false);
+            }
+
+            for(size_t i = 0; i < ile_przeczytac_z; i++){
+                size_t idx_wiersza = j + i - ile_przeczytac_z;
+
+                const wiersz_t& wiersz = znalezione_wiersze[idx_wiersza];
+
+                size_t offset = wiersz.byte_size() * znalezione_idx_wierszy[idx_wiersza];
+
+                size_t offset_aligned = (offset / _4kb) * _4kb;
+                
+                size_t location_in_block = offset - offset_aligned;
+
+                memcpy((void*)wiersz.dane.data(), 
+                        buffor + out_buffor_offset + _4kb * 2 * i + location_in_block,
+                        wiersz.byte_size());
+            }
+
+            ret = io_getevents(kontekst, ile_przeczytac_do, ile_przeczytac_do,
+                io_eventy.data(), &timeout);
+            if(ret != (int)ile_przeczytac_do){
+                printf("%s\n", strerror(errno));
+                assert(false);
+            }
+
+            // Tyle ile przeczytano teraz przenieść z buffora
+            ile_przeczytac_z = ile_przeczytac_do;
+
+            // zmienić połówke buffora
+            buffor_switch = !buffor_switch;
+        }
+
+        free(buffor);
+        ret = io_destroy(kontekst);
+        if(ret != 0){
+            printf("%s\n", strerror(-ret));
+            assert(false);
+        }
+    }
+
+    void wczytaj_wiersze(){
+        for(size_t i = 0; i < znalezione_idx_wierszy.size(); i++){
+            row_idx_t idx_wiersza = znalezione_idx_wierszy[i];
+            wiersz_t& wiersz = znalezione_wiersze[i];
+
+            lseek(fd_cale, idx_wiersza * wiersz.byte_size(), SEEK_SET);
+            size_t przeczytano = read(fd_cale, wiersz.dane.data(), wiersz.byte_size());
+            if(przeczytano == 0){
+                wiersz.dane.resize(0);
+            } else {
+                assert(przeczytano == wiersz.byte_size());
+            }
+        }
     }
 
     ~znajdywacz_w_pliku_t(){
-        fclose(fd_cale);
+        close(fd_cale);
     }
 
     wiersz_t nastepny(){
@@ -674,10 +862,35 @@ struct znajdywacz_w_pliku_t{
         }
 
         czytacz_kolumny.przeczytano(sizeof(rekord<int64_t>));
-        return wiersz_t(liczba_kolumn);
+        // return wiersz_t(liczba_kolumn);
         return przeczytaj_wiersz(fd_cale, liczba_kolumn, idx_wiersza);
     }
     
+};
+
+struct czasomierz_t{
+
+    std::chrono::steady_clock::time_point begin;
+    std::chrono::steady_clock::time_point end;
+    long int diff; //ys
+
+    float pomiar_czasu = 0.0f;
+
+    void start(){
+        printf("0.0 - start\n");
+        begin = std::chrono::steady_clock::now();
+    }
+
+    void update_teraz(){
+        end = std::chrono::steady_clock::now();
+        diff = (long int)std::chrono::duration_cast<std::chrono::microseconds> (end - begin).count();
+        pomiar_czasu = float(diff)/1000000.0f; // konwersja do sekund
+    }
+
+    void stop(){
+        update_teraz();
+        printf("%f - stop\n", pomiar_czasu);
+    }
 };
 
 int main(){
@@ -686,18 +899,19 @@ int main(){
             "C:\\Users\\kupcz\\Desktop\\Astroinfa\\lab1\\large-file.dat", 
             "C:\\Users\\kupcz\\Desktop\\Astroinfa\\lab1\\moj_format_duze\\");
     } else {
-        czytacz_mojego_t czytacz_mojego("C:\\Users\\kupcz\\Desktop\\Astroinfa\\lab1\\moj_format_duze\\");
-        znajdywacz_w_pliku_t znajdywacz(czytacz_mojego, "c4", 14);
 
-        wiersz_t wiersz = znajdywacz.nastepny();
-        uint32_t i = 1;
-        while(wiersz.dane.size() > 0){
-            // czytacz_mojego.printf_wiersz(wiersz);
-            // printf("%lld\n", wiersz.dane[4]);
-            wiersz = znajdywacz.nastepny();
-            i++;
-        }
-        printf("znaleziono: %d\n", i);
+        czasomierz_t czasomierz;
+        czasomierz.start();
+
+        czytacz_mojego_t czytacz_mojego("/home/krzys/Desktop/moj_format_duze/");
+        znajdywacz_w_pliku_t znajdywacz(czytacz_mojego, "c75", 0.4, 0.450);
+
+        znajdywacz.wczytaj_indeksy_wierszy();
+        znajdywacz.przygotuj_wiersze();
+        znajdywacz.wczytaj_wiersze_asynch();
+
+        czasomierz.stop();
+        printf("znaleziono: %d\n", (int)znajdywacz.znalezione_wiersze.size());
     }
 }
 
