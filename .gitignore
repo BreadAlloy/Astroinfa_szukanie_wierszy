@@ -2,6 +2,7 @@ out/*
 out_/*
 compile_commands.json
 
+*/small-file.dat
 */large-file.dat
 */moj_format/*
 */moj_format_duze/*
